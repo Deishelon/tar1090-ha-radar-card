@@ -16,12 +16,13 @@ Each range ring has a faint distance on it. The distances follow the zoom: close
 zoom out. The rings stay about the same size on the card. `range_km` is the furthest the outer ring is allowed to grow.
 
 The card reads `aircraft.json` and `receiver.json` in your browser. It does not use the MQTT bridge. The bridge still
-publishes the summary sensors. This card plots every aircraft.
+publishes the summary sensors. This card plots every aircraft. For those sensors, check out
+[tar1090-ha-bridge](https://github.com/Deishelon/tar1090-ha-bridge).
 
 Your tar1090 data URL already sends `Access-Control-Allow-Origin: *`, so a browser on another host can read it.
 
-| Zoomed in                                                                                               | Zoomed out                                                                                    |
-|---------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
+| Zoomed in                                                                      | Zoomed out                                                                      |
+|--------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
 | ![Radar card zoomed in with range rings and aircraft labels](assets/demo1.png) | ![Same card zoomed out, with more of the range rings visible](assets/demo2.png) |
 
 ## Install
