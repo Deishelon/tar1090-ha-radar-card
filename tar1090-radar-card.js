@@ -1,5 +1,6 @@
-// Home Assistant Lovelace card. No build step.
+// Home Assistant Lovelace cards. No build step.
 // Reads tar1090 aircraft.json and receiver.json in the browser.
+// tar1090-radar-card draws the map. tar1090-table-card lists the aircraft.
 
 const DEFAULTS = {
     height: 460,
@@ -354,6 +355,9 @@ function planeDistanceKm(aircraft, origin) {
     }
     if (isNum(aircraft.r_dst) && aircraft.r_dst >= 0) {
         return aircraft.r_dst * 1.852;
+    }
+    if (!isNum(aircraft.lat) || !isNum(aircraft.lon) || !isNum(origin.lat) || !isNum(origin.lon)) {
+        return null;
     }
     return haversineKm(origin.lat, origin.lon, aircraft.lat, aircraft.lon);
 }
@@ -1253,11 +1257,948 @@ if (!customElements.get("tar1090-radar-card")) {
     customElements.define("tar1090-radar-card", Tar1090RadarCard);
 }
 
+// Flight page opened from the callsign.
+// Add a provider with a name and a url(plane) function. The function returns an
+// absolute http(s) URL, or "" when that aircraft should stay plain text.
+// flight_link in the card YAML selects the name.
+// flight_link_url replaces every provider. Placeholders: {callsign} {hex} {registration}
+const FLIGHT_LINK_PROVIDERS = {
+    flightaware: {
+        name: "FlightAware",
+        url(plane) {
+            const callsign = callsignOf(plane);
+            if (callsign) {
+                return `https://www.flightaware.com/live/flight/${encodeURIComponent(callsign)}`;
+            }
+            const hex = icaoHex(plane);
+            return hex ? `https://www.flightaware.com/live/modes/${encodeURIComponent(hex)}` : "";
+        },
+    },
+    flightradar24: {
+        name: "Flightradar24",
+        url(plane) {
+            const callsign = callsignOf(plane);
+            return callsign ? `https://www.flightradar24.com/${encodeURIComponent(callsign)}` : "";
+        },
+    },
+};
+
+const TABLE_DEFAULTS = {
+    height: 460,
+    poll_interval: 2,
+    max_seen: 60,
+    show_ground: true,
+    show_status: true,
+    title: "",
+    latitude: null,
+    longitude: null,
+    flight_link: "flightaware",
+    flight_link_url: "",
+    lookup_url: "https://api.adsbdb.com/v0/callsign/{callsign}",
+    operators_url: "",
+    route_codes: "iata",
+};
+
+const TABLE_BOOLEAN_KEYS = ["show_ground", "show_status"];
+const TABLE_NUMBER_KEYS = ["height", "poll_interval", "max_seen", "latitude", "longitude"];
+
+const COLUMN_ALIASES = {
+    hex_id: "hex",
+    icao: "hex",
+    flight: "callsign",
+    alt: "altitude",
+    vert_rate: "vertical_rate",
+    vertical: "vertical_rate",
+    vrate: "vertical_rate",
+    dist: "distance",
+    sitedist: "distance",
+    msgs: "messages",
+    lat: "latitude",
+    lon: "longitude",
+    data_source: "source",
+    mil: "military",
+    wd: "wind_direction",
+    wind_d: "wind_direction",
+    ws: "wind_speed",
+    wind_s: "wind_speed",
+    reg: "registration",
+    aircraft_type: "type",
+};
+
+const SOURCE_LABELS = {
+    uat: "UAT",
+    mlat: "MLAT",
+    adsb: "ADS-B",
+    adsb_icao: "ADS-B",
+    adsb_other: "ADS-B",
+    adsb_icao_nt: "ADS-B noTP",
+    adsr: "ADS-R or UAT",
+    adsr_icao: "ADS-R or UAT",
+    adsr_other: "ADS-R or UAT",
+    tisb_icao: "TIS-B",
+    tisb_trackfile: "TIS-B",
+    tisb_other: "TIS-B",
+    tisb: "TIS-B",
+    modeS: "Mode S",
+    mode_s: "Mode S",
+    ais: "AIS",
+    mode_ac: "Mode A/C",
+    adsc: "ADS-C",
+    other: "Other",
+};
+
+const TABLE_COLUMNS = [
+    {id: "hex", label: "Hex ID", defaultOn: false, align: "left", sort: "text", raw: (plane) => icaoHex(plane), text: (plane) => icaoHex(plane).toUpperCase()},
+    {id: "callsign", label: "Callsign", defaultOn: true, align: "left", sort: "text", raw: (plane) => callsignOf(plane), text: (plane) => callsignOf(plane)},
+    {id: "airline", label: "Airline", defaultOn: false, align: "left", sort: "text", raw: (plane, ctx) => airlineInfo(plane, ctx).name, text: (plane, ctx) => airlineInfo(plane, ctx).name, title: (plane, ctx) => airlineInfo(plane, ctx).title},
+    {id: "route", label: "Route", defaultOn: true, align: "left", sort: "text", raw: (plane, ctx) => routeInfo(plane, ctx).text, text: (plane, ctx) => routeInfo(plane, ctx).text, title: (plane, ctx) => routeInfo(plane, ctx).title},
+    {id: "registration", label: "Registration", defaultOn: false, align: "left", sort: "text", raw: (plane) => textField(plane.r), text: (plane) => textField(plane.r)},
+    {id: "type", label: "Type", defaultOn: true, align: "left", sort: "text", raw: (plane) => textField(plane.t), text: (plane) => textField(plane.t), title: (plane) => textField(plane.desc)},
+    {id: "squawk", label: "Squawk", defaultOn: true, align: "right", sort: "text", raw: (plane) => textField(plane.squawk), text: (plane) => textField(plane.squawk)},
+    {id: "altitude", label: "Altitude", defaultOn: true, align: "right", sort: "number", raw: (plane) => altitudeSort(plane), text: (plane) => formatAltitude(plane, "m")},
+    {id: "speed", label: "Speed", defaultOn: true, align: "right", sort: "number", raw: (plane) => numberOrNull(plane.gs), text: (plane) => formatSpeed(numberOrNull(plane.gs), "kmh")},
+    {id: "vertical_rate", label: "Vertical Rate", defaultOn: false, align: "right", sort: "number", raw: (plane) => verticalRateFpm(plane), text: (plane) => formatVerticalRate(verticalRateFpm(plane), "m")},
+    {id: "distance", label: "Distance", defaultOn: true, align: "right", sort: "number", raw: (plane, ctx) => planeDistanceKm(plane, ctx.origin), text: (plane, ctx) => formatDistance(planeDistanceKm(plane, ctx.origin), "km")},
+    {id: "track", label: "Track", defaultOn: false, align: "right", sort: "number", raw: (plane) => trackOf(plane), text: (plane) => formatTrack(trackOf(plane))},
+    {id: "messages", label: "Messages", defaultOn: false, align: "right", sort: "number", raw: (plane) => numberOrNull(plane.messages), text: (plane) => numberOrNull(plane.messages) == null ? "" : String(Math.round(plane.messages))},
+    {id: "seen", label: "Seen", defaultOn: false, align: "right", sort: "number", raw: (plane) => numberOrNull(plane.seen), text: (plane) => numberOrNull(plane.seen) == null ? "" : `${Math.round(plane.seen)} s`},
+    {id: "rssi", label: "RSSI", defaultOn: true, align: "right", sort: "number", raw: (plane) => numberOrNull(plane.rssi), text: (plane) => numberOrNull(plane.rssi) == null ? "" : `${plane.rssi.toFixed(1)} dBFS`},
+    {id: "latitude", label: "Latitude", defaultOn: false, align: "right", sort: "number", raw: (plane) => numberOrNull(plane.lat), text: (plane) => numberOrNull(plane.lat) == null ? "" : plane.lat.toFixed(4)},
+    {id: "longitude", label: "Longitude", defaultOn: false, align: "right", sort: "number", raw: (plane) => numberOrNull(plane.lon), text: (plane) => numberOrNull(plane.lon) == null ? "" : plane.lon.toFixed(4)},
+    {id: "source", label: "Source", defaultOn: false, align: "left", sort: "text", raw: (plane) => sourceLabel(plane.type), text: (plane) => sourceLabel(plane.type)},
+    {id: "military", label: "Mil.", defaultOn: false, align: "right", sort: "text", raw: (plane) => militaryValue(plane), text: (plane) => militaryValue(plane)},
+    {id: "wind_direction", label: "Wind D.", defaultOn: false, align: "right", sort: "number", raw: (plane) => numberOrNull(plane.wd), text: (plane) => numberOrNull(plane.wd) == null ? "" : `${Math.round(plane.wd)}°`},
+    {id: "wind_speed", label: "Wind S.", defaultOn: false, align: "right", sort: "number", raw: (plane) => numberOrNull(plane.ws), text: (plane) => formatSpeed(numberOrNull(plane.ws), "kmh")},
+];
+
+const COLUMN_UNITS = {
+    altitude: "m",
+    speed: "km/h",
+    vertical_rate: "m/s",
+    distance: "km",
+    seen: "s",
+    rssi: "dBFS",
+    wind_speed: "km/h",
+    track: "°",
+    wind_direction: "°",
+};
+
+function columnHeading(column) {
+    const unit = COLUMN_UNITS[column.id];
+    return unit ? `${column.label} (${unit})` : column.label;
+}
+
+const TABLE_COLUMN_IDS = new Set(TABLE_COLUMNS.map((column) => column.id));
+
+const flightCache = new Map();
+const flightPending = new Set();
+const flightQueue = [];
+const flightListeners = new Set();
+let flightActive = 0;
+const FLIGHT_CONCURRENCY = 4;
+
+const operatorsPromises = new Map();
+const operatorsDiscovery = new Map();
+
+function textField(value) {
+    return value == null ? "" : String(value).trim();
+}
+
+function numberOrNull(value) {
+    return isNum(value) ? value : null;
+}
+
+function callsignOf(plane) {
+    return textField(plane && plane.flight);
+}
+
+function icaoHex(plane) {
+    return textField(plane && plane.hex).replace(/^~/, "").toLowerCase();
+}
+
+function registrationKey(plane) {
+    return textField(plane && plane.r).replace(/[-+\s]/g, "").toUpperCase();
+}
+
+function trackOf(plane) {
+    if (isNum(plane.track)) {
+        return plane.track;
+    }
+    if (isNum(plane.true_heading)) {
+        return plane.true_heading;
+    }
+    if (isNum(plane.calc_track)) {
+        return plane.calc_track;
+    }
+    return null;
+}
+
+function verticalRateFpm(plane) {
+    if (isNum(plane.baro_rate)) {
+        return plane.baro_rate;
+    }
+    if (isNum(plane.geom_rate)) {
+        return plane.geom_rate;
+    }
+    return null;
+}
+
+function altitudeSort(plane) {
+    if (plane.alt_baro === "ground") {
+        return -1e9;
+    }
+    return numberOrNull(plane.alt_baro);
+}
+
+function formatVerticalRate(fpm, altitudeUnit) {
+    if (!isNum(fpm)) {
+        return "";
+    }
+    if (altitudeUnit === "m") {
+        const text = (fpm * 0.00508).toFixed(1);
+        return `${text} m/s`;
+    }
+    return `${Math.round(fpm)} ft/min`;
+}
+
+function formatTrack(track) {
+    return isNum(track) ? `${Math.round(track)}°` : "";
+}
+
+function sourceLabel(type) {
+    const key = textField(type);
+    if (!key) {
+        return "";
+    }
+    return SOURCE_LABELS[key] || key;
+}
+
+function militaryValue(plane) {
+    if (!isNum(plane.dbFlags)) {
+        return "";
+    }
+    return (plane.dbFlags & 1) ? "yes" : "no";
+}
+
+function columnId(name) {
+    const key = String(name || "").trim().toLowerCase();
+    return COLUMN_ALIASES[key] || key;
+}
+
+function columnVisibility(columns) {
+    const visibility = {};
+    for (const column of TABLE_COLUMNS) {
+        visibility[column.id] = column.defaultOn;
+    }
+    if (Array.isArray(columns)) {
+        for (const column of TABLE_COLUMNS) {
+            visibility[column.id] = false;
+        }
+        for (const name of columns) {
+            const id = columnId(name);
+            if (TABLE_COLUMN_IDS.has(id)) {
+                visibility[id] = true;
+            }
+        }
+        return visibility;
+    }
+    if (columns && typeof columns === "object") {
+        for (const [name, value] of Object.entries(columns)) {
+            const id = columnId(name);
+            if (TABLE_COLUMN_IDS.has(id)) {
+                visibility[id] = asBool(value, visibility[id]);
+            }
+        }
+    }
+    return visibility;
+}
+
+function httpUrl(value) {
+    try {
+        const url = new URL(value);
+        if (url.protocol === "https:" || url.protocol === "http:") {
+            return url.href;
+        }
+    } catch (err) {
+        return "";
+    }
+    return "";
+}
+
+function applyLinkTemplate(template, plane) {
+    const values = {
+        callsign: callsignOf(plane),
+        hex: icaoHex(plane),
+        registration: textField(plane.r),
+    };
+    const missing = [];
+    const href = String(template).replace(/\{(callsign|hex|registration)\}/g, (token, key) => {
+        if (!values[key]) {
+            missing.push(key);
+            return "";
+        }
+        return encodeURIComponent(values[key]);
+    });
+    if (missing.length) {
+        return "";
+    }
+    return httpUrl(href);
+}
+
+function flightHref(config, plane) {
+    if (config.flight_link_url) {
+        return applyLinkTemplate(config.flight_link_url, plane);
+    }
+    if (config.flight_link === "none") {
+        return "";
+    }
+    const provider = FLIGHT_LINK_PROVIDERS[config.flight_link];
+    return provider ? httpUrl(provider.url(plane)) : "";
+}
+
+function lookupAirline(callsign, registration, category, operators) {
+    if (!operators || !callsign) {
+        return null;
+    }
+    if (category && String(category).startsWith("C")) {
+        return null;
+    }
+    const compact = String(callsign).replace(/\s/g, "");
+    if (compact.length < 4) {
+        return null;
+    }
+    const upper = compact.toUpperCase();
+    if (/^[A-Z]{4}$/.test(upper.slice(0, 4))) {
+        return null;
+    }
+    const prefix = upper.slice(0, 3);
+    if (!/^[A-Z]{3}$/.test(prefix)) {
+        return null;
+    }
+    const reg = String(registration || "").replace(/[-+\s]/g, "").toUpperCase();
+    if (reg && reg === upper) {
+        return null;
+    }
+    const operator = operators[prefix];
+    return operator && typeof operator === "object" ? operator : null;
+}
+
+function airlineInfo(plane, ctx) {
+    const own = textField(plane.ownOp);
+    if (own) {
+        return {name: own, title: ""};
+    }
+    const operator = lookupAirline(callsignOf(plane), plane.r, plane.category, ctx.operators);
+    if (operator && operator.n) {
+        const parts = [];
+        if (operator.c) {
+            parts.push(operator.c);
+        }
+        if (operator.r) {
+            parts.push(`"${operator.r}"`);
+        }
+        return {name: String(operator.n), title: parts.join(" / ")};
+    }
+    const lookedUp = peekFlight(ctx.config.lookup_url, callsignOf(plane));
+    if (lookedUp && lookedUp.airline) {
+        return {name: lookedUp.airline, title: lookedUp.airlineTitle || ""};
+    }
+    return {name: "", title: ""};
+}
+
+function routeInfo(plane, ctx) {
+    const embedded = textField(plane.route);
+    if (embedded) {
+        return {text: embedded, title: ""};
+    }
+    const lookedUp = peekFlight(ctx.config.lookup_url, callsignOf(plane));
+    if (!lookedUp) {
+        return {text: "", title: ""};
+    }
+    const text = ctx.config.route_codes === "icao" ? lookedUp.icao : lookedUp.iata;
+    return {text: text || lookedUp.iata || lookedUp.icao || "", title: lookedUp.title || ""};
+}
+
+function wantsFlightLookup(config) {
+    return Boolean(config.lookup_url) && (config.columns.route || config.columns.airline);
+}
+
+function shouldLookupCallsign(plane) {
+    const callsign = callsignOf(plane).toUpperCase();
+    if (callsign.length < 4) {
+        return false;
+    }
+    return registrationKey(plane) !== callsign;
+}
+
+function parseFlightLookup(body) {
+    const empty = {airline: "", airlineTitle: "", iata: "", icao: "", title: ""};
+    if (!body || typeof body !== "object") {
+        return empty;
+    }
+    if (typeof body.airline === "string" || typeof body.route === "string") {
+        const route = textField(body.route);
+        return {
+            airline: textField(body.airline),
+            airlineTitle: "",
+            iata: route,
+            icao: route,
+            title: textField(body.route_title || body.routeTitle),
+        };
+    }
+    const flight = body.response && typeof body.response === "object" ? body.response.flightroute : null;
+    if (!flight || typeof flight !== "object") {
+        return empty;
+    }
+    const airline = flight.airline && typeof flight.airline === "object" ? flight.airline : null;
+    const stops = [];
+    for (const key of ["origin", "midpoint", "destination"]) {
+        const airport = flight[key];
+        if (airport && typeof airport === "object") {
+            stops.push(airport);
+        }
+    }
+    const iata = stops.map((airport) => textField(airport.iata_code || airport.iata)).filter(Boolean).join(" - ");
+    const icao = stops.map((airport) => textField(airport.icao_code || airport.icao)).filter(Boolean).join(" - ");
+    const title = stops.map((airport) => textField(airport.municipality || airport.name)).filter(Boolean).join(" - ");
+    const airlineTitle = airline && airline.callsign ? `"${airline.callsign}"` : "";
+    return {
+        airline: airline ? textField(airline.name) : "",
+        airlineTitle,
+        iata,
+        icao,
+        title,
+    };
+}
+
+function flightCacheKey(urlTemplate, callsign) {
+    return `${urlTemplate}\n${String(callsign || "").trim().toUpperCase()}`;
+}
+
+function peekFlight(urlTemplate, callsign) {
+    if (!urlTemplate || !callsign) {
+        return null;
+    }
+    const hit = flightCache.get(flightCacheKey(urlTemplate, callsign));
+    if (!hit || hit.until < Date.now()) {
+        return null;
+    }
+    return hit.info;
+}
+
+function subscribeFlights(listener) {
+    flightListeners.add(listener);
+    return () => flightListeners.delete(listener);
+}
+
+function notifyFlights() {
+    for (const listener of flightListeners) {
+        listener();
+    }
+}
+
+function rememberFlight(key, info, ttl) {
+    flightCache.set(key, {until: Date.now() + ttl, info});
+    notifyFlights();
+}
+
+function enqueueFlight(urlTemplate, callsign) {
+    const key = flightCacheKey(urlTemplate, callsign);
+    if (!urlTemplate || !callsign || flightPending.has(key)) {
+        return;
+    }
+    if (flightCache.has(key) && flightCache.get(key).until > Date.now()) {
+        return;
+    }
+    flightPending.add(key);
+    flightQueue.push({urlTemplate, callsign: String(callsign).trim().toUpperCase(), key});
+    pumpFlights();
+}
+
+function pumpFlights() {
+    while (flightActive < FLIGHT_CONCURRENCY && flightQueue.length) {
+        const job = flightQueue.shift();
+        flightActive += 1;
+        fetchFlight(job).finally(() => {
+            flightActive -= 1;
+            flightPending.delete(job.key);
+            pumpFlights();
+        });
+    }
+}
+
+async function fetchFlight(job) {
+    const url = job.urlTemplate.split("{callsign}").join(encodeURIComponent(job.callsign));
+    let info = parseFlightLookup(null);
+    let ttl = 60 * 1000;
+    try {
+        const response = await fetch(url);
+        if (response.status === 404) {
+            ttl = 30 * 60 * 1000;
+        } else if (response.ok) {
+            info = parseFlightLookup(await response.json());
+            ttl = info.iata || info.icao || info.airline ? 6 * 60 * 60 * 1000 : 30 * 60 * 1000;
+        }
+    } catch (err) {
+        ttl = 60 * 1000;
+    }
+    rememberFlight(job.key, info, ttl);
+}
+
+function loadOperators(url) {
+    if (!url) {
+        return Promise.resolve(null);
+    }
+    if (!operatorsPromises.has(url)) {
+        operatorsPromises.set(url, fetch(url).then(async (response) => {
+            if (!response.ok) {
+                return null;
+            }
+            const data = await response.json();
+            return data && typeof data === "object" ? data : null;
+        }).catch(() => null));
+    }
+    return operatorsPromises.get(url);
+}
+
+function discoverOperatorsUrl(baseUrl) {
+    if (operatorsDiscovery.has(baseUrl)) {
+        return operatorsDiscovery.get(baseUrl);
+    }
+    const promise = (async () => {
+        const root = String(baseUrl || "").replace(/\/data$/i, "");
+        if (!root || root === baseUrl) {
+            return "";
+        }
+        const response = await fetch(`${root}/`);
+        if (!response.ok) {
+            return "";
+        }
+        const html = await response.text();
+        const match = html.match(/databaseFolder\s*=\s*["']([^"']+)["']/);
+        if (!match) {
+            return "";
+        }
+        const folder = match[1].replace(/^\/+|\/+$/g, "");
+        return `${root}/${folder}/operators.js`;
+    })().catch(() => "");
+    operatorsDiscovery.set(baseUrl, promise);
+    return promise;
+}
+
+function tableAircraft(doc, config) {
+    const list = Array.isArray(doc?.aircraft) ? doc.aircraft : [];
+    return list.filter((aircraft) => {
+        if (!config.show_ground && aircraft.alt_baro === "ground") {
+            return false;
+        }
+        if (config.max_seen > 0 && isNum(aircraft.seen) && aircraft.seen > config.max_seen) {
+            return false;
+        }
+        return true;
+    });
+}
+
+function mergeTableConfig(config) {
+    const source = config || {};
+    const merged = {...TABLE_DEFAULTS};
+    merged.base_url = String(source.base_url || "").trim().replace(/\/+$/, "");
+    if (!merged.base_url) {
+        throw new Error("base_url is required, for example https://example.com/tar1090/data");
+    }
+    for (const key of TABLE_BOOLEAN_KEYS) {
+        merged[key] = asBool(source[key], TABLE_DEFAULTS[key]);
+    }
+    for (const key of TABLE_NUMBER_KEYS) {
+        merged[key] = asNum(source[key], TABLE_DEFAULTS[key]);
+    }
+    merged.poll_interval = Math.max(1, merged.poll_interval);
+    merged.max_seen = Math.max(0, merged.max_seen);
+    merged.height = Math.max(120, merged.height);
+    merged.title = source.title == null ? "" : String(source.title);
+    merged.route_codes = String(source.route_codes || TABLE_DEFAULTS.route_codes).toLowerCase() === "icao" ? "icao" : "iata";
+    merged.operators_url = source.operators_url == null ? "" : String(source.operators_url).trim();
+    merged.lookup_url = source.lookup_url == null ? TABLE_DEFAULTS.lookup_url : String(source.lookup_url).trim();
+    if (merged.lookup_url && !merged.lookup_url.includes("{callsign}")) {
+        throw new Error("lookup_url must include {callsign}, or be empty to skip route lookup");
+    }
+    const names = Object.keys(FLIGHT_LINK_PROVIDERS).concat("none");
+    merged.flight_link = String(source.flight_link || TABLE_DEFAULTS.flight_link).trim().toLowerCase();
+    if (!names.includes(merged.flight_link)) {
+        throw new Error(`flight_link must be one of: ${names.join(", ")}`);
+    }
+    merged.flight_link_url = source.flight_link_url == null ? "" : String(source.flight_link_url).trim();
+    if (merged.flight_link_url && !/^https?:\/\//i.test(merged.flight_link_url)) {
+        throw new Error("flight_link_url must start with http:// or https://");
+    }
+    merged.columns = columnVisibility(source.columns);
+    return merged;
+}
+
+function compareTableRows(a, b, column, direction, ctx) {
+    const av = column.raw(a, ctx);
+    const bv = column.raw(b, ctx);
+    const aEmpty = av === null || av === undefined || av === "";
+    const bEmpty = bv === null || bv === undefined || bv === "";
+    if (aEmpty && bEmpty) {
+        return 0;
+    }
+    if (aEmpty) {
+        return 1;
+    }
+    if (bEmpty) {
+        return -1;
+    }
+    let result = 0;
+    if (column.sort === "number") {
+        result = av - bv;
+    } else {
+        result = String(av).localeCompare(String(bv), undefined, {numeric: true, sensitivity: "base"});
+    }
+    return direction === "desc" ? -result : result;
+}
+
+class Tar1090TableCard extends HTMLElement {
+    constructor() {
+        super();
+        this.attachShadow({mode: "open"});
+        this._config = null;
+        this._aircraft = [];
+        this._origin = null;
+        this._operators = null;
+        this._error = "";
+        this._timer = 0;
+        this._sortKey = "distance";
+        this._sortDir = "asc";
+        this._unsubscribe = null;
+        this.shadowRoot.innerHTML = `
+            <style>
+                :host { display: block; }
+                ha-card { overflow: hidden; }
+                .status {
+                    padding: 8px 12px 0;
+                    color: var(--secondary-text-color, #8b978c);
+                    font-size: 12px;
+                }
+                .status[hidden] { display: none; }
+                .scroll { overflow: auto; height: 460px; }
+                table {
+                    width: max-content;
+                    min-width: 100%;
+                    border-collapse: collapse;
+                    font-size: 13px;
+                    font-variant-numeric: tabular-nums;
+                }
+                th, td {
+                    padding: 6px 10px;
+                    border-bottom: 1px solid var(--divider-color, rgba(127, 127, 127, 0.28));
+                    white-space: nowrap;
+                    text-align: left;
+                }
+                th {
+                    position: sticky;
+                    top: 0;
+                    z-index: 1;
+                    background: var(--card-background-color, var(--ha-card-background, #1c1c1c));
+                }
+                th.num, td.num { text-align: right; }
+                button.col {
+                    all: unset;
+                    cursor: pointer;
+                    font: inherit;
+                    font-weight: 600;
+                    color: inherit;
+                }
+                button.col:focus-visible { outline: 2px solid var(--primary-color, #03a9f4); }
+                a { color: var(--primary-color, #03a9f4); text-decoration: none; }
+                a:hover { text-decoration: underline; }
+                tbody tr:hover td { background: color-mix(in srgb, var(--primary-color, #03a9f4) 12%, transparent); }
+                .empty {
+                    padding: 16px 12px;
+                    color: var(--secondary-text-color, #8b978c);
+                }
+            </style>
+            <ha-card>
+                <div class="status"></div>
+                <div class="scroll">
+                    <table>
+                        <thead><tr></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </ha-card>
+        `;
+        this._card = this.shadowRoot.querySelector("ha-card");
+        this._status = this.shadowRoot.querySelector(".status");
+        this._scroll = this.shadowRoot.querySelector(".scroll");
+        this._headRow = this.shadowRoot.querySelector("thead tr");
+        this._tbody = this.shadowRoot.querySelector("tbody");
+        this._headRow.addEventListener("click", (event) => this._sortClick(event));
+    }
+
+    static getStubConfig() {
+        return {
+            base_url: "https://example.com/tar1090/data",
+            height: 460,
+        };
+    }
+
+    setConfig(config) {
+        this._config = mergeTableConfig(config || {});
+        this._scroll.style.height = `${this._config.height}px`;
+        this._card.header = this._config.title;
+        this._status.hidden = !this._config.show_status;
+        if (this.isConnected) {
+            this._start();
+        }
+    }
+
+    set hass(hass) {
+        this._hass = hass;
+    }
+
+    getCardSize() {
+        const height = this._config?.height ?? TABLE_DEFAULTS.height;
+        return Math.max(1, Math.ceil(height / 50));
+    }
+
+    connectedCallback() {
+        this._unsubscribe = subscribeFlights(() => {
+            if (this.isConnected) {
+                this._render();
+            }
+        });
+        if (this._config) {
+            this._start();
+        }
+    }
+
+    disconnectedCallback() {
+        this._unsubscribe?.();
+        this._unsubscribe = null;
+        this._stop();
+    }
+
+    _start() {
+        this._stop();
+        this._loadOperators();
+        const tick = () => this._poll();
+        tick();
+        this._timer = window.setInterval(tick, this._config.poll_interval * 1000);
+    }
+
+    _stop() {
+        if (this._timer) {
+            window.clearInterval(this._timer);
+            this._timer = 0;
+        }
+    }
+
+    _loadOperators() {
+        const config = this._config;
+        if (!config.columns.airline) {
+            this._operators = null;
+            return;
+        }
+        const generation = (this._operatorGeneration || 0) + 1;
+        this._operatorGeneration = generation;
+        const apply = (operators) => {
+            if (this._operatorGeneration !== generation) {
+                return;
+            }
+            this._operators = operators;
+            if (this.isConnected) {
+                this._render();
+            }
+        };
+        if (config.operators_url) {
+            loadOperators(config.operators_url).then(apply);
+            return;
+        }
+        discoverOperatorsUrl(config.base_url).then((url) => loadOperators(url)).then(apply);
+    }
+
+    async _poll() {
+        const config = this._config;
+        if (!config) {
+            return;
+        }
+        const [aircraftResult, receiverResult] = await Promise.allSettled([
+            fetch(`${config.base_url}/aircraft.json`, {cache: "no-store"}),
+            fetch(`${config.base_url}/receiver.json`, {cache: "no-store"}),
+        ]);
+        if (aircraftResult.status === "fulfilled" && aircraftResult.value.ok) {
+            try {
+                const doc = await aircraftResult.value.json();
+                this._aircraft = tableAircraft(doc, config);
+                this._error = "";
+            } catch (err) {
+                this._error = "aircraft.json was not valid JSON";
+            }
+        } else {
+            const status = aircraftResult.status === "fulfilled" ? aircraftResult.value.status : "network";
+            this._error = `aircraft.json failed (${status})`;
+        }
+        if (receiverResult.status === "fulfilled" && receiverResult.value.ok) {
+            try {
+                const receiver = await receiverResult.value.json();
+                if (isNum(receiver.lat) && isNum(receiver.lon)) {
+                    this._origin = {lat: receiver.lat, lon: receiver.lon};
+                }
+            } catch (err) {
+                // Keep the last origin. Distance can still use r_dst.
+            }
+        }
+        if (!this._origin && isNum(config.latitude) && isNum(config.longitude)) {
+            this._origin = {lat: config.latitude, lon: config.longitude};
+        }
+        this._requestLookups();
+        this._render();
+    }
+
+    _requestLookups() {
+        const config = this._config;
+        if (!wantsFlightLookup(config)) {
+            return;
+        }
+        for (const plane of this._aircraft) {
+            if (shouldLookupCallsign(plane)) {
+                enqueueFlight(config.lookup_url, callsignOf(plane));
+            }
+        }
+    }
+
+    _context() {
+        return {
+            config: this._config,
+            origin: this._origin,
+            operators: this._operators,
+        };
+    }
+
+    _visibleColumns() {
+        return TABLE_COLUMNS.filter((column) => this._config.columns[column.id]);
+    }
+
+    _sorted(columns) {
+        const column = columns.find((item) => item.id === this._sortKey)
+            || TABLE_COLUMNS.find((item) => item.id === this._sortKey)
+            || columns[0];
+        if (!column) {
+            return this._aircraft.slice();
+        }
+        const ctx = this._context();
+        return this._aircraft.slice().sort((a, b) => compareTableRows(a, b, column, this._sortDir, ctx));
+    }
+
+    _sortClick(event) {
+        const element = event.target instanceof Element ? event.target : event.target.parentElement;
+        const button = element && element.closest("button[data-col]");
+        if (!button) {
+            return;
+        }
+        const id = button.dataset.col;
+        if (this._sortKey === id) {
+            this._sortDir = this._sortDir === "asc" ? "desc" : "asc";
+        } else {
+            this._sortKey = id;
+            this._sortDir = "asc";
+        }
+        this._render();
+    }
+
+    _render() {
+        const config = this._config;
+        if (!config) {
+            return;
+        }
+        const columns = this._visibleColumns();
+        const ctx = this._context();
+        const scroll = this._scroll.scrollTop;
+        const scrollLeft = this._scroll.scrollLeft;
+        this._headRow.replaceChildren();
+        for (const column of columns) {
+            const th = document.createElement("th");
+            th.className = column.align === "right" ? "num" : "";
+            th.setAttribute("aria-sort", column.id === this._sortKey ? (this._sortDir === "asc" ? "ascending" : "descending") : "none");
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "col";
+            button.dataset.col = column.id;
+            const mark = column.id === this._sortKey ? (this._sortDir === "asc" ? " ↑" : " ↓") : "";
+            button.textContent = `${columnHeading(column)}${mark}`;
+            th.appendChild(button);
+            this._headRow.appendChild(th);
+        }
+        this._tbody.replaceChildren();
+        const rows = this._sorted(columns);
+        if (!rows.length) {
+            const tr = document.createElement("tr");
+            const td = document.createElement("td");
+            td.colSpan = Math.max(1, columns.length);
+            td.className = "empty";
+            td.textContent = this._error || "No aircraft";
+            tr.appendChild(td);
+            this._tbody.appendChild(tr);
+        } else {
+            for (const plane of rows) {
+                const tr = document.createElement("tr");
+                for (const column of columns) {
+                    const td = document.createElement("td");
+                    if (column.align === "right") {
+                        td.className = "num";
+                    }
+                    const text = column.text(plane, ctx);
+                    const title = column.title ? column.title(plane, ctx) : "";
+                    if (title) {
+                        td.title = title;
+                    }
+                    if (column.id === "callsign" && text) {
+                        const href = flightHref(config, plane);
+                        if (href) {
+                            const link = document.createElement("a");
+                            link.href = href;
+                            link.target = "_blank";
+                            link.rel = "noopener noreferrer";
+                            link.textContent = text;
+                            td.appendChild(link);
+                        } else {
+                            td.textContent = text;
+                        }
+                    } else {
+                        td.textContent = text;
+                    }
+                    tr.appendChild(td);
+                }
+                this._tbody.appendChild(tr);
+            }
+        }
+        this._scroll.scrollTop = scroll;
+        this._scroll.scrollLeft = scrollLeft;
+        if (!config.show_status) {
+            this._status.textContent = "";
+            return;
+        }
+        this._status.textContent = this._error || `${rows.length} aircraft`;
+    }
+}
+
+if (!customElements.get("tar1090-table-card")) {
+    customElements.define("tar1090-table-card", Tar1090TableCard);
+}
+
 window.customCards = window.customCards || [];
 if (!window.customCards.some((card) => card.type === "tar1090-radar-card")) {
     window.customCards.push({
         type: "tar1090-radar-card",
         name: "tar1090 Radar",
         description: "Map with a radar overlay of aircraft from tar1090",
+    });
+}
+if (!window.customCards.some((card) => card.type === "tar1090-table-card")) {
+    window.customCards.push({
+        type: "tar1090-table-card",
+        name: "tar1090 Planes",
+        description: "Table of aircraft from tar1090",
     });
 }
