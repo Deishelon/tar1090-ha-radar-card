@@ -44,7 +44,7 @@ Reload the dashboard. Add a card with YAML. There is no visual editor.
 
 ```yaml
 type: custom:tar1090-radar-card
-base_url: https://plane.home.deishelon.com/map/data
+base_url: https://example.com/tar1090/data
 height: 460
 ```
 
@@ -59,7 +59,7 @@ Distance labels off, speed and callsign on, rings never larger than 80 km, wheel
 
 ```yaml
 type: custom:tar1090-radar-card
-base_url: https://plane.home.deishelon.com/map/data
+base_url: https://example.com/tar1090/data
 height: 520
 show_distance: false
 show_speed: true
@@ -74,7 +74,7 @@ Pure radar, no street map:
 
 ```yaml
 type: custom:tar1090-radar-card
-base_url: https://plane.home.deishelon.com/map/data
+base_url: https://example.com/tar1090/data
 show_map: false
 show_sweep: true
 show_crosshair: true

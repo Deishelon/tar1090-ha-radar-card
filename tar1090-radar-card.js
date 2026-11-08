@@ -143,7 +143,7 @@ function mergeConfig(config) {
     const merged = {...DEFAULTS, ...config};
     merged.base_url = String(config.base_url || "").trim().replace(/\/+$/, "");
     if (!merged.base_url) {
-        throw new Error("base_url is required, for example https://plane.home.deishelon.com/map/data");
+        throw new Error("base_url is required, for example https://example.com/tar1090/data");
     }
     for (const key of BOOLEAN_KEYS) {
         merged[key] = asBool(config[key], DEFAULTS[key]);
@@ -523,7 +523,7 @@ class Tar1090RadarCard extends HTMLElement {
 
     static getStubConfig() {
         return {
-            base_url: "https://plane.home.deishelon.com/map/data",
+            base_url: "https://example.com/tar1090/data",
             height: 460,
         };
     }
