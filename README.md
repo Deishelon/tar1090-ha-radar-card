@@ -153,6 +153,8 @@ The table always uses metric units. Altitude is metres, vertical rate is m/s, sp
 
 Columns you leave out of `columns` keep the default. Set a column to `false` to hide it. A YAML list instead of a map turns on only the columns you name.
 
+![Plane table with callsign, route, type, squawk, altitude, and speed](assets/demo3.png)
+
 Unquoted `false` and `true` in YAML are booleans. `base_url` is required. Every other key is optional.
 
 ### Examples
