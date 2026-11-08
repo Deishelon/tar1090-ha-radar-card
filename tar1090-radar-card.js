@@ -103,6 +103,18 @@ function isNum(value) {
     return typeof value === "number" && Number.isFinite(value);
 }
 
+function parseDemoHome(value) {
+    if (!value || typeof value !== "object") {
+        return null;
+    }
+    const lat = asNum(value.lat ?? value.latitude, null);
+    const lng = asNum(value.lng ?? value.lon ?? value.longitude, null);
+    if (!isNum(lat) || !isNum(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return null;
+    }
+    return {lat, lng};
+}
+
 function asBool(value, fallback) {
     if (value === undefined || value === null || value === "") {
         return fallback;
@@ -157,6 +169,8 @@ function mergeConfig(config) {
     merged.distance_unit = String(merged.distance_unit || "km").toLowerCase();
     merged.speed_unit = String(merged.speed_unit || "kmh").toLowerCase();
     merged.altitude_unit = String(merged.altitude_unit || "m").toLowerCase();
+    // See docs/demo-home.md. Not listed in the README.
+    merged.demo_home = parseDemoHome(config.demo_home);
     return merged;
 }
 
@@ -281,6 +295,26 @@ function haversineKm(lat1, lon1, lat2, lon2) {
     return 2 * radius * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
+function initialBearing(lat1, lon1, lat2, lon2) {
+    const phi1 = (lat1 * Math.PI) / 180;
+    const phi2 = (lat2 * Math.PI) / 180;
+    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+    const y = Math.sin(dLon) * Math.cos(phi2);
+    const x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLon);
+    return (Math.atan2(y, x) * 180) / Math.PI;
+}
+
+function shiftToDemoHome(aircraft, real, demo) {
+    return aircraft.map((plane) => {
+        const km = haversineKm(real.lat, real.lon, plane.lat, plane.lon);
+        if (km < 0.001) {
+            return {...plane, lat: demo.lat, lon: demo.lng};
+        }
+        const point = destination(demo.lat, demo.lng, km, initialBearing(real.lat, real.lon, plane.lat, plane.lon));
+        return {...plane, lat: point.lat, lon: point.lon};
+    });
+}
+
 function destination(lat, lon, distanceKm, bearingDeg) {
     const radius = 6371;
     const delta = distanceKm / radius;
@@ -398,6 +432,7 @@ class Tar1090RadarCard extends HTMLElement {
         this._zoom = null;
         this._center = null;
         this._origin = null;
+        this._realOrigin = null;
         this._aircraft = [];
         this._error = "";
         this._userMoved = false;
@@ -622,18 +657,31 @@ class Tar1090RadarCard extends HTMLElement {
             const status = aircraftResult.status === "fulfilled" ? aircraftResult.value.status : "network";
             this._error = `aircraft.json failed (${status})`;
         }
+        let real = null;
         if (receiverResult.status === "fulfilled" && receiverResult.value.ok) {
             try {
                 const receiver = await receiverResult.value.json();
                 if (isNum(receiver.lat) && isNum(receiver.lon)) {
-                    this._origin = {lat: receiver.lat, lon: receiver.lon};
+                    real = {lat: receiver.lat, lon: receiver.lon};
                 }
             } catch (err) {
-                // Keep the last origin. Aircraft can still be drawn.
+                // Keep the last real origin. Aircraft can still be drawn.
             }
         }
-        if (!this._origin && isNum(config.latitude) && isNum(config.longitude)) {
-            this._origin = {lat: config.latitude, lon: config.longitude};
+        if (!real && isNum(config.latitude) && isNum(config.longitude)) {
+            real = {lat: config.latitude, lon: config.longitude};
+        }
+        if (!real) {
+            real = this._realOrigin;
+        }
+        if (real) {
+            this._realOrigin = real;
+        }
+        if (real && config.demo_home) {
+            this._origin = {lat: config.demo_home.lat, lon: config.demo_home.lng};
+            this._aircraft = shiftToDemoHome(this._aircraft, real, config.demo_home);
+        } else if (real) {
+            this._origin = real;
         }
         this._maybeAutocenter();
         this._applyAutoZoom();
@@ -662,6 +710,9 @@ class Tar1090RadarCard extends HTMLElement {
         }
         if (this._origin) {
             this._center = {lat: this._origin.lat, lon: this._origin.lon};
+            return;
+        }
+        if (this._config?.demo_home) {
             return;
         }
         if (!this._center && this._aircraft.length) {
