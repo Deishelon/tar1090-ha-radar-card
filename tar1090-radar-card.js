@@ -41,6 +41,7 @@ const DEFAULTS = {
     show_reset: true,
     reset_after: 60,
     scroll_zoom: false,
+    two_finger_pan: false,
     pan: true,
     auto_zoom: true,
     initial_zoom: 11,
@@ -75,7 +76,7 @@ const BOOLEAN_KEYS = [
     "show_ground",
     "show_zoom_controls",
     "show_reset",
-    "scroll_zoom",
+    "two_finger_pan",
     "pan",
     "auto_zoom",
 ];
@@ -116,6 +117,26 @@ function parseDemoHome(value) {
     return {lat, lng};
 }
 
+function parseScrollZoom(value, fallback) {
+    if (value === undefined || value === null || value === "") {
+        return fallback;
+    }
+    if (typeof value === "string") {
+        const text = value.trim().toLowerCase();
+        if (text === "alt") {
+            return "alt";
+        }
+        if (["false", "no", "off", "0"].includes(text)) {
+            return false;
+        }
+        if (["true", "yes", "on", "1"].includes(text)) {
+            return true;
+        }
+        return fallback;
+    }
+    return value ? true : false;
+}
+
 function asBool(value, fallback) {
     if (value === undefined || value === null || value === "") {
         return fallback;
@@ -149,6 +170,7 @@ function mergeConfig(config) {
     for (const key of BOOLEAN_KEYS) {
         merged[key] = asBool(config[key], DEFAULTS[key]);
     }
+    merged.scroll_zoom = parseScrollZoom(config.scroll_zoom, DEFAULTS.scroll_zoom);
     for (const key of NUMBER_KEYS) {
         merged[key] = asNum(config[key], DEFAULTS[key]);
     }
@@ -442,6 +464,7 @@ class Tar1090RadarCard extends HTMLElement {
         this._userMoved = false;
         this._idleTimer = 0;
         this._drag = null;
+        this._pointers = new Map();
         this._tiles = new Map();
         this._timer = 0;
         this._raf = 0;
@@ -518,11 +541,20 @@ class Tar1090RadarCard extends HTMLElement {
         this._buttons.in.addEventListener("click", () => this._stepZoom(1));
         this._buttons.out.addEventListener("click", () => this._stepZoom(-1));
         this._buttons.reset.addEventListener("click", () => this._resetView());
+        this._onWindowPointerMove = (event) => this._touchPointerMove(event);
+        this._onWindowPointerDone = (event) => this._touchPointerDone(event);
         this._frame.addEventListener("pointerdown", (event) => this._pointerDown(event));
         this._frame.addEventListener("pointermove", (event) => this._pointerMove(event));
         this._frame.addEventListener("pointerup", (event) => this._pointerUp(event));
         this._frame.addEventListener("pointercancel", (event) => this._pointerUp(event));
         this._frame.addEventListener("wheel", (event) => this._wheel(event), {passive: false});
+        // One finger keeps scrolling the dashboard. Two fingers pan the map.
+        this._frame.addEventListener("touchmove", (event) => {
+            if (!this._config?.pan || !this._config.two_finger_pan || event.touches.length < 2) {
+                return;
+            }
+            event.preventDefault();
+        }, {passive: false});
     }
 
     static getStubConfig() {
@@ -533,6 +565,7 @@ class Tar1090RadarCard extends HTMLElement {
     }
 
     setConfig(config) {
+        this._clearTouchPointers();
         this._config = mergeConfig(config || {});
         if (this._zoom == null) {
             this._zoom = clampZoom(this._config, this._config.initial_zoom);
@@ -566,13 +599,20 @@ class Tar1090RadarCard extends HTMLElement {
     disconnectedCallback() {
         this._resizeObserver?.disconnect();
         this._stop();
+        this._clearTouchPointers();
     }
 
     _applyChrome() {
         const config = this._config;
         this._frame.style.height = `${config.height}px`;
         this._frame.style.background = config.background;
-        this._frame.style.touchAction = config.pan ? "none" : "auto";
+        if (!config.pan) {
+            this._frame.style.touchAction = "auto";
+        } else if (config.two_finger_pan) {
+            this._frame.style.touchAction = "pan-x pan-y";
+        } else {
+            this._frame.style.touchAction = "none";
+        }
         this._card.header = config.title;
         this._buttons.in.hidden = !config.show_zoom_controls;
         this._buttons.out.hidden = !config.show_zoom_controls;
@@ -806,22 +846,126 @@ class Tar1090RadarCard extends HTMLElement {
         if (!this._config?.pan || !this._center) {
             return;
         }
+        if (event.pointerType === "touch" && this._config.two_finger_pan) {
+            this._addTouchPointer(event);
+            this._syncTwoFingerDrag();
+            return;
+        }
         this._drag = {
             x: event.clientX,
             y: event.clientY,
             lat: this._center.lat,
             lon: this._center.lon,
             moved: false,
+            two: false,
         };
         this._frame.setPointerCapture(event.pointerId);
     }
 
     _pointerMove(event) {
-        if (!this._drag) {
+        if (this._pointers.has(event.pointerId)) {
             return;
         }
-        const dx = event.clientX - this._drag.x;
-        const dy = event.clientY - this._drag.y;
+        if (!this._drag || this._drag.two) {
+            return;
+        }
+        this._panFrom(event.clientX, event.clientY);
+    }
+
+    _pointerUp(event) {
+        if (this._pointers.has(event.pointerId)) {
+            this._touchPointerDone(event);
+            return;
+        }
+        if (this._frame.hasPointerCapture(event.pointerId)) {
+            this._frame.releasePointerCapture(event.pointerId);
+        }
+        if (!this._drag?.two) {
+            this._drag = null;
+        }
+    }
+
+    _addTouchPointer(event) {
+        if (this._pointers.size === 0) {
+            window.addEventListener("pointermove", this._onWindowPointerMove);
+            window.addEventListener("pointerup", this._onWindowPointerDone);
+            window.addEventListener("pointercancel", this._onWindowPointerDone);
+        }
+        this._pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    }
+
+    _touchPointerMove(event) {
+        if (!this._pointers.has(event.pointerId)) {
+            return;
+        }
+        this._pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+        if (!this._drag?.two) {
+            return;
+        }
+        const mid = this._touchMidpoint();
+        this._panFrom(mid.x, mid.y);
+    }
+
+    _touchPointerDone(event) {
+        if (!this._pointers.has(event.pointerId)) {
+            return;
+        }
+        this._pointers.delete(event.pointerId);
+        if (this._pointers.size === 0) {
+            this._unbindTouchWindow();
+        }
+        this._syncTwoFingerDrag();
+    }
+
+    _clearTouchPointers() {
+        this._pointers.clear();
+        this._unbindTouchWindow();
+        if (this._drag?.two) {
+            this._drag = null;
+        }
+    }
+
+    _unbindTouchWindow() {
+        window.removeEventListener("pointermove", this._onWindowPointerMove);
+        window.removeEventListener("pointerup", this._onWindowPointerDone);
+        window.removeEventListener("pointercancel", this._onWindowPointerDone);
+    }
+
+    _syncTwoFingerDrag() {
+        if (!this._config?.two_finger_pan || !this._center || this._pointers.size < 2) {
+            if (this._drag?.two) {
+                this._drag = null;
+            }
+            return;
+        }
+        if (this._drag?.two) {
+            return;
+        }
+        const mid = this._touchMidpoint();
+        this._drag = {
+            x: mid.x,
+            y: mid.y,
+            lat: this._center.lat,
+            lon: this._center.lon,
+            moved: false,
+            two: true,
+        };
+    }
+
+    _touchMidpoint() {
+        let x = 0;
+        let y = 0;
+        for (const point of this._pointers.values()) {
+            x += point.x;
+            y += point.y;
+        }
+        const count = this._pointers.size || 1;
+        return {x: x / count, y: y / count};
+    }
+
+    _panFrom(x, y) {
+        const dx = x - this._drag.x;
+        const dy = y - this._drag.y;
         if (!this._drag.moved && Math.hypot(dx, dy) < 4) {
             return;
         }
@@ -832,15 +976,12 @@ class Tar1090RadarCard extends HTMLElement {
         this._draw();
     }
 
-    _pointerUp(event) {
-        if (this._frame.hasPointerCapture(event.pointerId)) {
-            this._frame.releasePointerCapture(event.pointerId);
-        }
-        this._drag = null;
-    }
-
     _wheel(event) {
-        if (!this._config?.scroll_zoom) {
+        const mode = this._config?.scroll_zoom;
+        if (!mode) {
+            return;
+        }
+        if (mode === "alt" && !event.altKey) {
             return;
         }
         event.preventDefault();

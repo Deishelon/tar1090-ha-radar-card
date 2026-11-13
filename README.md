@@ -29,7 +29,7 @@ The browser must be able to reach `base_url`. A phone on your LAN can. A remote 
 
 ## Radar card
 
-`custom:tar1090-radar-card` draws a normal map, then a radar overlay on top: range rings, your receiver, and each aircraft from tar1090. Drag to pan. The origin stays on its real position while the map moves. Zoom with the + and − buttons.
+`custom:tar1090-radar-card` draws a normal map, then a radar overlay on top: range rings, your receiver, and each aircraft from tar1090. Drag to pan. The origin stays on its real position while the map moves. Zoom with the + and − buttons. `scroll_zoom: alt` zooms with the wheel only while Alt is held. `two_finger_pan: true` pans a touch screen with two fingers, and leaves one finger for scrolling the dashboard.
 
 By default the card zooms to the furthest aircraft and follows it as the aircraft move. A plane that starts far away zooms the map out only far enough to keep that plane on screen. As it comes closer, the map zooms back in. That stops while you pan or zoom, and starts again after ↺ or the idle reset. `auto_zoom: false` keeps `initial_zoom` until you change it yourself.
 
@@ -62,6 +62,15 @@ show_altitude: true
 range_km: 80
 ring_count: 4
 scroll_zoom: true
+```
+
+Wheel zoom only while Alt is held, and two-finger pan on a phone. A mouse still pans with one drag:
+
+```yaml
+type: custom:tar1090-radar-card
+base_url: https://example.com/tar1090/data
+scroll_zoom: alt
+two_finger_pan: true
 ```
 
 Pure radar, no street map:
@@ -126,8 +135,9 @@ Unquoted `false` and `true` in YAML are booleans. `base_url` is required. Every 
 | `show_zoom_controls` | `true`                           | + and − buttons.                                                                                                                                               |
 | `show_reset`         | `true`                           | Button that returns the map to the receiver. With `auto_zoom` it uses the fitted zoom; otherwise `initial_zoom`. `show_recenter` still works as an older name. |
 | `reset_after`        | `60`                             | Seconds of no interaction before that reset happens on its own. `0` turns the timer off.                                                                       |
-| `scroll_zoom`        | `false`                          | Zoom with the mouse wheel while the pointer is over the card.                                                                                                  |
+| `scroll_zoom`        | `false`                          | `true` zooms with the mouse wheel over the card. `alt` does that only while Alt is held (Option on a Mac). The page still scrolls when Alt is up.              |
 | `pan`                | `true`                           | Drag to move the map. The receiver stays pinned to its coordinates.                                                                                            |
+| `two_finger_pan`     | `false`                          | On a touch screen, pan with two fingers. One finger scrolls the dashboard. A mouse still drags with one button. Does nothing when `pan` is `false`.            |
 | `auto_zoom`          | `true`                           | Fit the zoom to the furthest aircraft, and update it as aircraft move. `false` opts out. Paused after you pan or zoom, until ↺ or `reset_after`.               |
 | `initial_zoom`       | `11`                             | Zoom when the card loads, when no aircraft are in view, and when `auto_zoom` is off. Integer, 4 is far away and 16 is close.                                   |
 | `min_zoom`           | `4`                              | Furthest zoom out.                                                                                                                                             |
